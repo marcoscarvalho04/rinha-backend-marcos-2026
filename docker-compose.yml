@@ -13,12 +13,12 @@ services:
     environment:
       - SOCKET_PATH=/run/api.sock
       - GOGC=off
-      - GOMEMLIMIT=210MiB
+      - GOMEMLIMIT=115MiB
     deploy:
       resources:
         limits:
-          cpus: "0.6"
-          memory: "250MB"
+          cpus: "0.4"
+          memory: "140MB"
 
   api02:
     image: mpsiqueira/rinha-backend-marcos-2026:latest
@@ -28,12 +28,12 @@ services:
     environment:
       - SOCKET_PATH=/run/api.sock
       - GOGC=off
-      - GOMEMLIMIT=210MiB
+      - GOMEMLIMIT=115MiB
     deploy:
       resources:
         limits:
-          cpus: "0.6"
-          memory: "250MB"
+          cpus: "0.4"
+          memory: "140MB"
 
   nginx:
     image: nginx:latest
@@ -49,5 +49,5 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.3"
-          memory: "50MB"
+          cpus: "0.2"
+          memory: "70MB"
