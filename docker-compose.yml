@@ -1,27 +1,20 @@
 version: '3.5'
 
+volumes:
+  sock01:
+  sock02:
+
 services:
   api01:
-    build: . # Vai rodar o nosso Dockerfile com os 2 estágios
-    image: rinha-api
+    build: .
+    image: rinha-api:latest
     hostname: api01
-    ports:
-      - "9998:9999" # Expõe localmente apenas para debug
-    deploy:
-      resources:
-        limits:
-          cpus: "0.6"       # 0.6 + 0.6 + 0.3 (Load Balancer) = 1.5 CPUs totais
-          memory: "250MB"   # 250MB + 250MB + 50MB (Load Balancer) = 550MB totais
-    # Montamos um volume temporário na RAM (tmpfs) para que as instâncias 
-    # não usem I/O de disco caso queiramos compartilhar memória no futuro
-    tmpfs:
-      - /app/data
-
-  api02:
-    image: rinha-api # Reusa a imagem buildada pela api01
-    hostname: api02
-    ports:
-      - "9997:9999"
+    volumes:
+      - sock01:/run
+    environment:
+      - SOCKET_PATH=/run/api.sock
+      - GOGC=off
+      - GOMEMLIMIT=210MiB
     deploy:
       resources:
         limits:
@@ -30,11 +23,29 @@ services:
     tmpfs:
       - /app/data
 
-  # O Load Balancer (Nginx) que vai receber a porrada do Gatling na porta 9999
+  api02:
+    image: rinha-api:latest
+    hostname: api02
+    volumes:
+      - sock02:/run
+    environment:
+      - SOCKET_PATH=/run/api.sock
+      - GOGC=off
+      - GOMEMLIMIT=210MiB
+    deploy:
+      resources:
+        limits:
+          cpus: "0.6"
+          memory: "250MB"
+    tmpfs:
+      - /app/data
+
   nginx:
     image: nginx:latest
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - sock01:/run/api01
+      - sock02:/run/api02
     depends_on:
       - api01
       - api02

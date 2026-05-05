@@ -12,14 +12,14 @@ all: clean precompute build
 # 1. Gera o banco de dados em memória (o arquivo .bin)
 precompute:
 	@echo "🔥 [1/3] Rodando o Pré-processamento..."
-	go run cmd/precompute/main.go
+	go run ./cmd/precompute/
 
 # 2. Compila a API Go + Motor C
 # -ldflags="-s -w" remove informações de debug do binário Go, deixando ele muito menor e mais rápido de carregar.
 build:
 	@echo "🔨 [2/3] Compilando a API (Go + CGO)..."
 	@mkdir -p bin
-	go build -ldflags="-s -w" -o bin/api cmd/api/main.go
+	go build -ldflags="-s -w" -o bin/api ./cmd/api/
 	@echo "✅ Build concluído: ./bin/api"
 
 # 3. Roda o binário final gerado

@@ -1,24 +1,68 @@
 package main
 
-
-import "C"
-
 import (
-	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
-	"unsafe"
+
+	gojson "github.com/goccy/go-json"
+	"github.com/marcos-codes/rinha-2026/internal/engine"
 )
 
-// --- Estruturas e Pool para Performance ---
+// --- Configuração carregada em startup ---
+
+type NormConfig struct {
+	MaxAmount            float32 `json:"max_amount"`
+	MaxInstallments      float32 `json:"max_installments"`
+	AmountVsAvgRatio     float32 `json:"amount_vs_avg_ratio"`
+	MaxMinutes           float32 `json:"max_minutes"`
+	MaxKm                float32 `json:"max_km"`
+	MaxTxCount24h        float32 `json:"max_tx_count_24h"`
+	MaxMerchantAvgAmount float32 `json:"max_merchant_avg_amount"`
+}
+
+var (
+	norm    NormConfig
+	mccRisk map[string]float32
+)
+
+func loadConfig() {
+	normData, err := os.ReadFile("./resources/normalization.json")
+	if err != nil {
+		log.Fatalf("Erro ao ler normalization.json: %v", err)
+	}
+	if err := gojson.Unmarshal(normData, &norm); err != nil {
+		log.Fatalf("Erro ao decodificar normalization.json: %v", err)
+	}
+
+	mccData, err := os.ReadFile("./resources/mcc_risk.json")
+	if err != nil {
+		log.Fatalf("Erro ao ler mcc_risk.json: %v", err)
+	}
+	if err := gojson.Unmarshal(mccData, &mccRisk); err != nil {
+		log.Fatalf("Erro ao decodificar mcc_risk.json: %v", err)
+	}
+
+	fmt.Printf("✅ Configuração carregada: %d MCCs conhecidos.\n", len(mccRisk))
+}
+
+func mccRiskFor(mcc string) float32 {
+	if r, ok := mccRisk[mcc]; ok {
+		return r
+	}
+	return 0.5
+}
+
+// --- Estruturas e Pool ---
 
 type Transaction struct {
-	Amount      float32 `json:"amount"`
+	Amount       float32 `json:"amount"`
 	Installments int     `json:"installments"`
-	RequestedAt string  `json:"requested_at"`
+	RequestedAt  string  `json:"requested_at"`
 }
 
 type Customer struct {
@@ -32,134 +76,182 @@ type LastTransaction struct {
 	KmFromCurrent float32 `json:"km_from_current"`
 }
 
+type Merchant struct {
+	ID        string  `json:"id"`
+	MCC       string  `json:"mcc"`
+	AvgAmount float32 `json:"avg_amount"`
+}
+
+type Terminal struct {
+	IsOnline    bool    `json:"is_online"`
+	CardPresent bool    `json:"card_present"`
+	KmFromHome  float32 `json:"km_from_home"`
+}
+
 type FraudPayload struct {
 	ID              string           `json:"id"`
 	Transaction     Transaction      `json:"transaction"`
 	Customer        Customer         `json:"customer"`
-	Merchant        struct {
-		ID        string  `json:"id"`
-		MCC       string  `json:"mcc"`
-		AvgAmount float32 `json:"avg_amount"`
-	} `json:"merchant"`
-	Terminal        struct {
-		IsOnline   bool    `json:"is_online"`
-		CardPresent bool    `json:"card_present"`
-		KmFromHome  float32 `json:"km_from_home"`
-	} `json:"terminal"`
+	Merchant        Merchant         `json:"merchant"`
+	Terminal        Terminal         `json:"terminal"`
 	LastTransaction *LastTransaction `json:"last_transaction"`
 }
 
-// Pool para reutilizar a estrutura e evitar alocações na Heap a cada request
-var payloadPool = sync.Pool{
-	New: func() any {
-		return new(FraudPayload)
-	},
+// FraudResponse é tipado para evitar alocação de map a cada resposta.
+type FraudResponse struct {
+	Approved   bool    `json:"approved"`
+	FraudScore float32 `json:"fraud_score"`
 }
 
-// --- Lógica de Apoio ---
+var payloadPool = sync.Pool{
+	New: func() any { return new(FraudPayload) },
+}
 
-func clamp(v float32) float32 {
-	if v < 0 { return 0 }
-	if v > 1 { return 1 }
-	return v
+// --- Parsing de tempo sem alocação ---
+
+// parseRFC3339Hour extrai a hora de uma string RFC3339 sem alocar time.Time.
+// Formato fixo: "2006-01-02T15:04:05Z" — hora nos índices 11:13.
+func parseRFC3339Hour(s string) float32 {
+	if len(s) < 13 {
+		return 0
+	}
+	h := int(s[11]-'0')*10 + int(s[12]-'0')
+	return float32(h) / 23.0
+}
+
+// parseRFC3339Weekday calcula o dia da semana (0=Dom..6=Sab) via algoritmo de Tomohiko Sakamoto.
+func parseRFC3339Weekday(s string) float32 {
+	if len(s) < 10 {
+		return 0
+	}
+	y := int(s[0]-'0')*1000 + int(s[1]-'0')*100 + int(s[2]-'0')*10 + int(s[3]-'0')
+	m := int(s[5]-'0')*10 + int(s[6]-'0')
+	d := int(s[8]-'0')*10 + int(s[9]-'0')
+	t := []int{0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4}
+	if m < 3 {
+		y--
+	}
+	w := (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7
+	return float32(w) / 6.0
+}
+
+// diffMinutes calcula a diferença em minutos entre dois timestamps RFC3339.
+// Usa time.Parse apenas quando necessário — ambos os campos têm formato garantido.
+func diffMinutes(from, to string) float32 {
+	t1, err1 := time.Parse(time.RFC3339, from)
+	t2, err2 := time.Parse(time.RFC3339, to)
+	if err1 != nil || err2 != nil {
+		return 0
+	}
+	return float32(t2.Sub(t1).Minutes())
 }
 
 // --- Handlers ---
+
+func clamp(v float32) float32 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
 
 func readyHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
 func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
-	// 1. Pega estrutura do pool
 	payload := payloadPool.Get().(*FraudPayload)
+	// Reset de campos que não são sobrescritos integralmente pelo decoder
+	payload.Customer.KnownMerchants = payload.Customer.KnownMerchants[:0]
+	payload.LastTransaction = nil
 	defer payloadPool.Put(payload)
 
-	// 2. Decode rápido
-	// Dica: Para performance extrema, troque encoding/json por "github.com/goccy/go-json"
-	if err := json.NewDecoder(r.Body).Decode(payload); err != nil {
+	if err := gojson.NewDecoder(r.Body).Decode(payload); err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	// 3. Vetorização (As 14 dimensões conforme REGRAS_DE_DETECCAO.md)
-	// Usamos 16 posições para o padding SIMD no C
 	var vec [16]float32
 
-	vec[0] = clamp(payload.Transaction.Amount / 10000.0)
-	vec[1] = clamp(float32(payload.Transaction.Installments) / 12.0)
-	vec[2] = clamp((payload.Transaction.Amount / payload.Customer.AvgAmount) / 10.0)
-	
-	t, _ := time.Parse(time.RFC3339, payload.Transaction.RequestedAt)
-	vec[3] = float32(t.Hour()) / 23.0
-	vec[4] = float32(t.Weekday()) / 6.0
+	vec[0] = clamp(payload.Transaction.Amount / norm.MaxAmount)
+	vec[1] = clamp(float32(payload.Transaction.Installments) / norm.MaxInstallments)
+	vec[2] = clamp((payload.Transaction.Amount / payload.Customer.AvgAmount) / norm.AmountVsAvgRatio)
+	vec[3] = parseRFC3339Hour(payload.Transaction.RequestedAt)
+	vec[4] = parseRFC3339Weekday(payload.Transaction.RequestedAt)
 
 	if payload.LastTransaction == nil {
 		vec[5] = -1.0
 		vec[6] = -1.0
 	} else {
-		lastT, _ := time.Parse(time.RFC3339, payload.LastTransaction.Timestamp)
-		diffMin := float32(t.Sub(lastT).Minutes())
-		vec[5] = clamp(diffMin / 1440.0)
-		vec[6] = clamp(payload.LastTransaction.KmFromCurrent / 1000.0)
+		diff := diffMinutes(payload.LastTransaction.Timestamp, payload.Transaction.RequestedAt)
+		vec[5] = clamp(diff / norm.MaxMinutes)
+		vec[6] = clamp(payload.LastTransaction.KmFromCurrent / norm.MaxKm)
 	}
 
-	vec[7] = clamp(payload.Terminal.KmFromHome / 1000.0)
-	vec[8] = clamp(float32(payload.Customer.TxCount24h) / 20.0)
-	
-	if payload.Terminal.IsOnline { vec[9] = 1.0 } else { vec[9] = 0 }
-	if payload.Terminal.CardPresent { vec[10] = 1.0 } else { vec[10] = 0 }
-	
-	// Exemplo simplificado de busca de mercante
-	isUnknown := 1.0
+	vec[7] = clamp(payload.Terminal.KmFromHome / norm.MaxKm)
+	vec[8] = clamp(float32(payload.Customer.TxCount24h) / norm.MaxTxCount24h)
+
+	if payload.Terminal.IsOnline {
+		vec[9] = 1.0
+	}
+	if payload.Terminal.CardPresent {
+		vec[10] = 1.0
+	}
+
+	isUnknown := float32(1.0)
 	for _, m := range payload.Customer.KnownMerchants {
 		if m == payload.Merchant.ID {
 			isUnknown = 0.0
 			break
 		}
 	}
-	vec[11] = float32(isUnknown)
-	vec[12] = 0.5 // TODO: Implementar lookup no mcc_risk.json
-	vec[13] = clamp(payload.Merchant.AvgAmount / 10000.0)
-	
-	// Posições 14 e 15 são padding (0.0)
+	vec[11] = isUnknown
+	vec[12] = mccRiskFor(payload.Merchant.MCC)
+	vec[13] = clamp(payload.Merchant.AvgAmount / norm.MaxMerchantAvgAmount)
 
-	// 4. Chamada CGO para o motor em C
-	cResult := C.search_top_5((*C.float)(unsafe.Pointer(&vec[0])))
-
-	// 5. Resposta
-	score := float32(cResult.score)
-	response := map[string]any{
-		"approved":    score < 0.6,
-		"fraud_score": score,
-	}
+	result := engine.GetFraudScore(&vec)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	gojson.NewEncoder(w).Encode(FraudResponse{
+		Approved:   result.Approved,
+		FraudScore: result.Score,
+	})
 }
 
 func main() {
-	// Inicialização do C (mmap da base de dados)
-	// O C precisa carregar o arquivo binário gerado no pre-caching
-	cPath := C.CString("./resources/dataset_otimizado.bin")
-	defer C.free(unsafe.Pointer(cPath))
-	
-	// TODO: C.init_memory(cPath) na implementação do core.c
+	loadConfig()
+	engine.Init("./resources/dataset_otimizado.bin")
 	fmt.Println("🚀 Memória mapeada via mmap. Motor C pronto.")
 
-	// Configuração do Router minimalista (Go 1.22+)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ready", readyHandler)
 	mux.HandleFunc("POST /fraud-score", fraudScoreHandler)
 
 	server := &http.Server{
-		Addr:         ":9999",
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
-	fmt.Println("🔥 API de Detecção de Fraude rodando na porta 9999")
-	log.Fatal(server.ListenAndServe())
+	// SOCKET_PATH definido → unix socket (produção via Docker).
+	// Sem variável → TCP na 9999 (desenvolvimento local).
+	if socketPath := os.Getenv("SOCKET_PATH"); socketPath != "" {
+		os.Remove(socketPath)
+		ln, err := net.Listen("unix", socketPath)
+		if err != nil {
+			log.Fatalf("Erro ao criar unix socket %s: %v", socketPath, err)
+		}
+		os.Chmod(socketPath, 0777)
+		defer os.Remove(socketPath)
+		fmt.Printf("🔥 API rodando via unix socket: %s\n", socketPath)
+		log.Fatal(server.Serve(ln))
+	} else {
+		server.Addr = ":9999"
+		fmt.Println("🔥 API de Detecção de Fraude rodando na porta 9999")
+		log.Fatal(server.ListenAndServe())
+	}
 }

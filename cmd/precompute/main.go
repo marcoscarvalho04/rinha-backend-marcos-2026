@@ -1,147 +1,142 @@
 package main
 
 import (
-	"encoding/json"
+	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
-	"time"
+	"runtime"
+	"sync"
 )
 
-// Constantes Oficiais da Documentação
 const (
-	MaxAmount             = 10000.0
-	MaxInstallments       = 12.0
-	AmountVsAvgRatio      = 10.0
-	MaxMinutes            = 1440.0
-	MaxKm                 = 1000.0
-	MaxTxCount24h         = 20.0
-	MaxMerchantAvgAmount  = 10000.0
-	NumClusters           = 1024 // Para 3M de records
-	VectorDim             = 16   // 14 + 2 padding
+	NumClusters = 1024
+	VectorDim   = 16
+	KMeansIter  = 5
 )
 
 type ReferenceRecord struct {
-	ID          string `json:"id"`
-	IsFraud     bool   `json:"is_fraud"` // Campo extra no dataset de referência
-	Transaction struct {
-		Amount      float32 `json:"amount"`
-		Installments int     `json:"installments"`
-		RequestedAt string  `json:"requested_at"`
-	} `json:"transaction"`
-	Customer struct {
-		AvgAmount      float32  `json:"avg_amount"`
-		TxCount24h     int      `json:"tx_count_24h"`
-		KnownMerchants []string `json:"known_merchants"`
-	} `json:"customer"`
-	Merchant struct {
-		ID        string  `json:"id"`
-		MCC       string  `json:"mcc"`
-		AvgAmount float32 `json:"avg_amount"`
-	} `json:"merchant"`
-	Terminal struct {
-		IsOnline    bool    `json:"is_online"`
-		CardPresent bool    `json:"card_present"`
-		KmFromHome  float32 `json:"km_from_home"`
-	} `json:"terminal"`
-	LastTransaction *struct {
-		Timestamp     string  `json:"timestamp"`
-		KmFromCurrent float32 `json:"km_from_current"`
-	} `json:"last_transaction"`
+	Vector [14]float32 `json:"vector"`
+	Label  string      `json:"label"` // "legit" ou "fraud"
 }
 
 func main() {
 	fmt.Println("📖 Lendo references.json...")
-	file, _ := os.Open("./resources/references.json")
+	file, err := os.Open("./resources/references.json")
+	if err != nil {
+		panic("Erro ao abrir references.json: " + err.Error())
+	}
 	defer file.Close()
 
 	var records []ReferenceRecord
-	json.NewDecoder(file).Decode(&records)
+	if err := json.NewDecoder(file).Decode(&records); err != nil {
+		panic("Erro ao decodificar references.json: " + err.Error())
+	}
 
 	total := len(records)
-	fmt.Printf("✅ %d registos carregados. Iniciando vetorização oficial...\n", total)
+	fmt.Printf("✅ %d registros carregados.\n", total)
 
 	vectors := make([][16]float32, total)
 	labels := make([]uint8, total)
 
 	for i, r := range records {
-		v := vectorize(r)
-		vectors[i] = v
-		if r.IsFraud { labels[i] = 1 } else { labels[i] = 0 }
-	}
-
-	// Clusterização IVF (K-Means simplificado para 1 iteração ou centroids aleatórios)
-	fmt.Println("🏙️  Agrupando em clusters (IVF)...")
-	centroids := make([][16]float32, NumClusters)
-	for i := 0; i < NumClusters; i++ {
-		centroids[i] = vectors[i * (total/NumClusters)] 
-	}
-
-	buckets := make([][]int, NumClusters)
-	for i, v := range vectors {
-		bestC := 0
-		minD := float32(math.MaxFloat32)
-		for cID, cV := range centroids {
-			d := distSq(v, cV)
-			if d < minD {
-				minD = d
-				bestC = cID
-			}
+		copy(vectors[i][:14], r.Vector[:])
+		if r.Label == "fraud" {
+			labels[i] = 1
 		}
-		buckets[bestC] = append(buckets[bestC], i)
 	}
 
-	fmt.Println("Salvando arquivo binário...")
+	fmt.Printf("🏙️  Executando K-Means (%d clusters, %d iterações, %d workers)...\n",
+		NumClusters, KMeansIter, runtime.NumCPU())
 
-	// Salva o binário otimizado
+	centroids := initCentroids(vectors)
+	for iter := 0; iter < KMeansIter; iter++ {
+		assignments := assignParallel(vectors, centroids)
+		centroids = updateCentroids(vectors, assignments)
+		fmt.Printf("   Iteração %d/%d concluída.\n", iter+1, KMeansIter)
+	}
+
+	// Atribuição final para montar os buckets
+	assignments := assignParallel(vectors, centroids)
+	buckets := make([][]int, NumClusters)
+	for i, c := range assignments {
+		buckets[c] = append(buckets[c], i)
+	}
+
+	fmt.Println("💾 Salvando dataset_otimizado.bin...")
 	saveOptimizedBinary(centroids, buckets, vectors, labels)
-
-	fmt.Println("✅ Arquivo binário otimizado criado!")
+	fmt.Println("✅ dataset_otimizado.bin criado com sucesso!")
 }
 
-func vectorize(r ReferenceRecord) [16]float32 {
-	var v [16]float32
-	
-	// Dim 0: Amount
-	v[0] = float32(math.Min(float64(r.Transaction.Amount/MaxAmount), 1.0))
-	// Dim 1: Installments
-	v[1] = float32(math.Min(float64(float32(r.Transaction.Installments)/MaxInstallments), 1.0))
-	// Dim 2: Amount vs Avg
-	v[2] = float32(math.Min(float64((r.Transaction.Amount/r.Customer.AvgAmount)/AmountVsAvgRatio), 1.0))
-	
-	t, _ := time.Parse(time.RFC3339, r.Transaction.RequestedAt)
-	// Dim 3: Hour
-	v[3] = float32(t.Hour()) / 23.0
-	// Dim 4: Day of Week
-	v[4] = float32(t.Weekday()) / 6.0
+// initCentroids escolhe NumClusters vetores aleatórios como centróides iniciais.
+func initCentroids(vectors [][16]float32) [][16]float32 {
+	perm := rand.Perm(len(vectors))
+	centroids := make([][16]float32, NumClusters)
+	for i := 0; i < NumClusters; i++ {
+		centroids[i] = vectors[perm[i]]
+	}
+	return centroids
+}
 
-	// Dim 5 & 6: Last Transaction
-	if r.LastTransaction == nil {
-		v[5] = -1.0
-		v[6] = -1.0
-	} else {
-		lt, _ := time.Parse(time.RFC3339, r.LastTransaction.Timestamp)
-		diff := float32(t.Sub(lt).Minutes())
-		v[5] = float32(math.Min(float64(diff/MaxMinutes), 1.0))
-		v[6] = float32(math.Min(float64(r.LastTransaction.KmFromCurrent/MaxKm), 1.0))
+// assignParallel atribui cada vetor ao centróide mais próximo usando todos os CPUs.
+func assignParallel(vectors [][16]float32, centroids [][16]float32) []int {
+	assignments := make([]int, len(vectors))
+	nWorkers := runtime.NumCPU()
+	chunkSize := (len(vectors) + nWorkers - 1) / nWorkers
+
+	var wg sync.WaitGroup
+	for w := 0; w < nWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > len(vectors) {
+			end = len(vectors)
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				bestC, minD := 0, float32(math.MaxFloat32)
+				for c, cv := range centroids {
+					if d := distSq(vectors[i], cv); d < minD {
+						minD = d
+						bestC = c
+					}
+				}
+				assignments[i] = bestC
+			}
+		}(start, end)
+	}
+	wg.Wait()
+	return assignments
+}
+
+// updateCentroids recalcula cada centróide como a média dos vetores do seu cluster.
+func updateCentroids(vectors [][16]float32, assignments []int) [][16]float32 {
+	sums := make([][16]float64, NumClusters)
+	counts := make([]int, NumClusters)
+
+	for i, c := range assignments {
+		counts[c]++
+		for d := 0; d < 14; d++ {
+			sums[c][d] += float64(vectors[i][d])
+		}
 	}
 
-	v[7] = float32(math.Min(float64(r.Terminal.KmFromHome/MaxKm), 1.0))
-	v[8] = float32(math.Min(float64(float32(r.Customer.TxCount24h)/MaxTxCount24h), 1.0))
-	
-	if r.Terminal.IsOnline { v[9] = 1.0 } else { v[9] = 0 }
-	if r.Terminal.CardPresent { v[10] = 1.0 } else { v[10] = 0 }
-
-	isUnknown := 1.0
-	for _, m := range r.Customer.KnownMerchants {
-		if m == r.Merchant.ID { isUnknown = 0.0; break }
+	centroids := make([][16]float32, NumClusters)
+	for c := 0; c < NumClusters; c++ {
+		if counts[c] == 0 {
+			// Centróide vazio: reinicializa com vetor aleatório
+			centroids[c] = vectors[rand.Intn(len(vectors))]
+			continue
+		}
+		for d := 0; d < 14; d++ {
+			centroids[c][d] = float32(sums[c][d] / float64(counts[c]))
+		}
 	}
-	v[11] = float32(isUnknown)
-	v[12] = 0.5 // Risco do MCC (Idealmente ler do mcc_risk.json)
-	v[13] = float32(math.Min(float64(r.Merchant.AvgAmount/MaxMerchantAvgAmount), 1.0))
-
-	return v
+	return centroids
 }
 
 func distSq(a, b [16]float32) float32 {
@@ -155,14 +150,17 @@ func distSq(a, b [16]float32) float32 {
 
 func saveOptimizedBinary(centroids [][16]float32, buckets [][]int, allVectors [][16]float32, labels []uint8) {
 	f, err := os.Create("./resources/dataset_otimizado.bin")
-	defer f.Close()
 	if err != nil {
-		panic("Erro ao criar arquivo: %v", err)
+		panic("Erro ao criar dataset_otimizado.bin: " + err.Error())
 	}
-	// 1. Escreve Centróides
-	binary.Write(f, binary.LittleEndian, centroids)
+	defer f.Close()
 
-	// 2. Escreve Offsets
+	w := bufio.NewWriterSize(f, 8*1024*1024) // buffer de 8MB
+
+	// 1. Centróides: 1024 × 16 float32
+	binary.Write(w, binary.LittleEndian, centroids)
+
+	// 2. Offsets dos buckets: 1025 uint32
 	offsets := make([]uint32, NumClusters+1)
 	curr := uint32(0)
 	for i, b := range buckets {
@@ -170,19 +168,23 @@ func saveOptimizedBinary(centroids [][16]float32, buckets [][]int, allVectors []
 		curr += uint32(len(b))
 	}
 	offsets[NumClusters] = curr
-	binary.Write(f, binary.LittleEndian, offsets)
+	binary.Write(w, binary.LittleEndian, offsets)
 
-	// 3. Escreve Vetores reordenados por bucket
+	// 3. Vetores reordenados por bucket: N × 16 float32
 	for _, b := range buckets {
 		for _, idx := range b {
-			binary.Write(f, binary.LittleEndian, allVectors[idx])
+			binary.Write(w, binary.LittleEndian, allVectors[idx])
 		}
 	}
 
-	// 4. Escreve Labels reordenados
+	// 4. Labels reordenados: N × uint8
 	for _, b := range buckets {
 		for _, idx := range b {
-			binary.Write(f, binary.LittleEndian, labels[idx])
+			w.WriteByte(labels[idx])
 		}
+	}
+
+	if err := w.Flush(); err != nil {
+		panic("Erro ao fazer flush do binário: " + err.Error())
 	}
 }

@@ -1,2 +1,3 @@
 #project specific
-./resources/*
+resources/references.json
+resources/dataset_otimizado.bin

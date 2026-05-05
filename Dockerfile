@@ -25,8 +25,10 @@ WORKDIR /app
 # Copia APENAS o executável compilado do estágio anterior
 COPY --from=builder /app/bin/api .
 
-# Copia APENAS o banco de dados binário já mastigado
-COPY --from=builder /app/data/dataset_otimizado.bin ./data/
+# Copia os recursos necessários em runtime
+COPY --from=builder /app/resources/dataset_otimizado.bin ./resources/
+COPY --from=builder /app/resources/mcc_risk.json ./resources/
+COPY --from=builder /app/resources/normalization.json ./resources/
 
 # Expõe a porta que a Rinha exige
 EXPOSE 9999

@@ -1,0 +1,82 @@
+### Verifica se a API está online
+GET http://localhost:9999/ready
+
+### Transação Legítima (Baixo Risco)
+# Transação com valor próximo à média do cliente, mesmo mercante conhecido, 
+# perto de casa e com cartão presente.
+POST http://localhost:9999/fraud-score
+Content-Type: application/json
+
+{
+  "id": "tx-legit-001",
+  "transaction": {
+    "amount": 55.0,
+    "installments": 1,
+    "requested_at": "2026-05-05T12:00:00Z"
+  },
+  "customer": {
+    "avg_amount": 50.0,
+    "tx_count_24h": 2,
+    "known_merchants": ["merch-123", "merch-456"]
+  },
+  "merchant": {
+    "id": "merch-123",
+    "mcc": "5411",
+    "avg_amount": 60.0
+  },
+  "terminal": {
+    "is_online": true,
+    "card_present": true,
+    "km_from_home": 2.5
+  },
+  "last_transaction": {
+    "timestamp": "2026-05-05T08:00:00Z",
+    "km_from_current": 1.2
+  }
+}
+
+### Transação Suspeita (Alto Risco)
+# Valor muito acima da média, muitas transações nas últimas 24h, 
+# mercante desconhecido, longe de casa, compra online (cartão não presente).
+POST http://localhost:9999/fraud-score
+Content-Type: application/json
+
+{
+  "id": "tx-fraud-002",
+  "transaction": {
+    "amount": 9500.0,
+    "installments": 12,
+    "requested_at": "2026-05-05T03:30:00Z"
+  },
+  "customer": {
+    "avg_amount": 100.0,
+    "tx_count_24h": 15,
+    "known_merchants": ["merch-123"]
+  },
+  "merchant": {
+    "id": "merch-999",
+    "mcc": "5942",
+    "avg_amount": 2500.0
+  },
+  "terminal": {
+    "is_online": false,
+    "card_present": false,
+    "km_from_home": 850.0
+  },
+  "last_transaction": {
+    "timestamp": "2026-05-05T03:20:00Z",
+    "km_from_current": 800.0
+  }
+}
+
+### Transação com Erro (Faltando campos)
+# Para testar como a API lida com payloads inválidos.
+POST http://localhost:9999/fraud-score
+Content-Type: application/json
+
+{
+  "id": "tx-invalid-003",
+  "transaction": {
+    "amount": "não é um número"
+  }
+}

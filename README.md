@@ -1,93 +1,132 @@
-# 🚀 Rinha de Backend 2026 - Motor Vetorial de Alta Performance (Go + CGO + SIMD)
+# Rinha de Backend 2026 — Motor de Detecção de Fraudes
 
-Este repositório contém uma solução de extrema performance desenhada para a **Rinha de Backend 2026** (Detecção de Fraudes via Busca Vetorial).
-
-O desafio exige processar buscas vetoriais em uma base de **3 milhões de transações** operando sob restrições severas de hardware: **1.5 CPUs e 550MB de RAM** no total.
-
-Para sobreviver e dominar esse ambiente, esta arquitetura abandona o processamento tradicional de JSON em tempo de execução e a varredura linear (*brute force*), descendo até o *Bare Metal* com Go e C.
+API de detecção de fraudes em tempo real construída para a **Rinha de Backend 2026**. O sistema classifica transações via busca pelos k-vizinhos mais próximos em um dataset de referência com 3 milhões de vetores, operando sob restrições severas de hardware: **1,5 CPUs e 550 MB de RAM** compartilhados em toda a stack.
 
 ---
 
-## 🧠 A Arquitetura (A "Receita Secreta")
+## Arquitetura
 
-Nossa API foi desenhada com 4 pilares focados em latência na casa dos microssegundos:
+O pipeline é dividido em duas etapas: uma fase de pré-processamento offline e uma fase de serviço em tempo real.
 
-1. **AOT Precompute (K-Means IVF):** Antes da API subir, um script em Go lê o `references.json`, aplica a normalização das 14 dimensões oficiais, e clusteriza os 3 milhões de vetores em 1.024 "bairros" usando um Índice de Arquivo Invertido (IVF). O resultado é salvo em um arquivo binário (`.bin`) perfeitamente alinhado.
-2. **Zero-Copy Memory (`mmap`):** A API não lê arquivos no boot. O motor em C faz uma chamada direta ao Kernel do Linux via `mmap`, projetando os ~195MB do arquivo binário direto na memória RAM instantaneamente, compartilhando a mesma página de memória entre as instâncias do container.
-3. **Hardware Intrinsics (AVX2 SIMD):** A busca da Distância Euclidiana não usa loops comuns em C. Usamos instruções vetoriais `AVX2` de 256-bits (`immintrin.h`) para processar as 16 dimensões do vetor simultaneamente na CPU.
-4. **Zero-Allocation Hot Path:** O servidor web em Golang (`net/http`) utiliza `sync.Pool` para reciclar as estruturas de payload do JSON. Durante o teste de estresse do Gatling, o *Garbage Collector* do Go fica com virtualmente zero pressão.
+```
+references.json ──► [precompute] ──► dataset_otimizado.bin ──► [mmap] ──► Motor C (AVX2)
+                                                                               ▲
+Requisição HTTP ──► API Go ──► vetorizar (14 dims) ────────────────────────────┘
+```
+
+### Offline — `cmd/precompute`
+
+Lê o `references.json` (vetores float[14] já pré-computados + label "legit"/"fraud"), clusteriza os 3M vetores em 1.024 buckets usando **K-Means com refinamento iterativo completo**, e serializa o resultado em um formato binário compacto.
+
+- Inicialização dos centróides por amostragem aleatória (elimina viés de posição no arquivo)
+- Atribuição paralela usando todos os CPUs disponíveis (`runtime.NumCPU()` goroutines)
+- Atualização de centróides recalcula a média real de cada cluster; clusters vazios são reinicializados com vetores sorteados
+- Escrita via `bufio.Writer` com buffer de 8 MB (minimiza syscalls)
+
+O formato binário gerado é autocontido:
+
+| Seção | Tamanho |
+|---|---|
+| 1.024 centróides | 1024 × 16 × 4 bytes |
+| Offsets dos buckets | 1025 × 4 bytes |
+| Vetores (reordenados por bucket) | N × 16 × 4 bytes |
+| Labels (reordenados por bucket) | N × 1 byte |
+
+### Runtime — `cmd/api`
+
+Recebe `POST /fraud-score`, normaliza os campos da transação em um vetor float32 de 14 dimensões (preenchido até 16 para alinhamento SIMD) e delega ao motor C via pacote `internal/engine`.
+
+```
+Requisição → decode JSON (sync.Pool) → vetorizar → engine.GetFraudScore → encode JSON
+```
+
+### Motor C — `internal/engine`
+
+Exposto ao Go por uma fronteira CGO limpa (`fraud.go` → `core.h`). Na inicialização, `mmap(MAP_SHARED)` projeta o dataset binário direto na memória do processo — sem leituras de arquivo em tempo de requisição, e ambas as instâncias do container compartilham as mesmas páginas físicas.
+
+Por requisição (`search_top_5`):
+
+1. **Varredura de centróides** — produtos internos AVX2 nos 1.024 centróides para encontrar o cluster mais próximo
+2. **Busca no bucket** — varredura linear nos vetores daquele cluster; insertion sort mantém os 5 vizinhos mais próximos
+3. **Pontuação** — `fraud_score = (vizinhos fraudulentos no top-5) / 5,0`
+
+AVX2 processa 16 floats por iteração de loop (dois registradores de 256 bits via `_mm256_loadu_ps`), compilado com `-O3 -mavx2`.
+
+### Infraestrutura
+
+| Serviço | CPU | RAM | Função |
+|---|---|---|---|
+| api01 | 0,6 | 250 MB | Instância primária |
+| api02 | 0,6 | 250 MB | Instância secundária |
+| nginx | 0,3 | 50 MB | Load balancer |
+
+O Nginx é configurado com `epoll`, pool de keepalive de 500 conexões para os upstreams e logging completamente desativado.
 
 ---
 
-## 🛠️ Pré-requisitos
+## Pré-requisitos
 
-Como utilizamos chamadas nativas POSIX (`mmap`) e otimizações de CPU, o ambiente de desenvolvimento ideal é Linux (ou Windows via WSL 2).
+Linux ou WSL 2 (POSIX `mmap`), CPU com suporte a AVX2, Go 1.22+, GCC, Make, Docker.
 
-* **Go** (1.22 ou superior)
-* **Make**
-* **Compilador C** (GCC ou Clang)
-* **Podman** (ou Docker)
-* **Podman-Compose** (ou Docker Compose)
-
-Para instalar a base de compilação em distribuições baseadas em RedHat/Fedora:
 ```bash
-sudo dnf install golang make gcc clang -y
+# Debian/Ubuntu
+sudo apt install golang make gcc
+
+# Fedora/RHEL
+sudo dnf install golang make gcc
 ```
 
 ---
 
-## 🏗️ Como Executar
+## Execução
 
-### 1. Ingestão e Pré-processamento
-Coloque o arquivo de dados original da Rinha (`references.json`) dentro da pasta `./resources/` na raiz do projeto. Em seguida, gere o banco de dados otimizado:
+### Via Docker (recomendado)
 
-```bash
-make precompute
-```
-> **Nota:** Isso vai gerar o arquivo `./data/dataset_otimizado.bin` contendo a matriz clusterizada.
-
-### 2. Compilação e Build da Imagem
-Faça o build da imagem nativamente usando a ferramenta de contêiner da sua preferência:
+Coloque o `references.json` em `./resources/` e execute:
 
 ```bash
-docker build -t rinha-api .
+docker compose up --build
 ```
 
-### 3. Subindo a Infraestrutura Completa
-O projeto acompanha um `docker-compose.yml` já configurado com as amarras de CPU e RAM oficiais da Rinha, além de um Nginx tunado para máxima concorrência.
+O Dockerfile executa `make precompute` e `make build` dentro do estágio de build, dispensando qualquer configuração local além do arquivo de dados.
 
 ```bash
-docker-compose up -d
-```
-
-A API estará respondendo na porta **9999**:
-```bash
+# Health check
 curl -i http://localhost:9999/ready
+
+# Fraud score
+curl -s -X POST http://localhost:9999/fraud-score \
+  -H "Content-Type: application/json" \
+  -d @payload.json
+```
+
+### Localmente
+
+```bash
+# 1. Gera o dataset binário (requer ./resources/references.json)
+make precompute
+
+# 2. Compila e sobe a API
+make run
 ```
 
 ---
 
-## 📁 Estrutura de Diretórios
+## Resposta
 
-```text
-.
-├── cmd/
-│   ├── api/          # Ponto de entrada da API HTTP em Golang
-│   └── precompute/   # Script de Ingestão offline e clusterização IVF
-├── internal/
-│   └── engine/       # O Motor Híbrido CGO (core.c + core.h)
-├── resources/        # Coloque o references.json aqui (Ignorado no Git)
-├── data/             # Onde o dataset_otimizado.bin será gerado
-├── Dockerfile        # Multi-stage build (Compila Go + CGO com -mavx2)
-├── docker-compose.yml# Topologia de teste (Nginx + API 01 + API 02)
-├── nginx.conf        # Configuração do Load Balancer (Keep-alive, epoll, logs off)
-└── Makefile          # Orquestração de comandos de pré-processamento e compilação
+```json
+{
+  "approved": false,
+  "fraud_score": 0.8
+}
 ```
+
+`fraud_score` está no intervalo [0,0 — 1,0]. Transações com `fraud_score >= 0,6` são rejeitadas (`approved: false`).
 
 ---
 
-## 🧪 Teste de Estresse (Gatling)
+## Limitações Conhecidas
 
-Após subir os contêineres, execute a bateria de testes oficial da Rinha de Backend apontando para `http://localhost:9999`. 
-
-Graças à combinação do Roteador Multiplexado do Go 1.22 e da execução C-Stack, a API foi desenhada para não enfileirar requisições na porta, repassando o gargalo estritamente para os ciclos de CPU da máquina host.
+- Risco de MCC fixo em `0,5` — carregar de `mcc_risk.json` melhoraria a precisão dos vetores
+- Busca IVF com `nprobe = 1` (apenas o cluster mais próximo) — buscar em 2–4 clusters aumentaria o recall com custo marginal de latência
+- K-Means sem inicialização K-Means++ — uma semente probabilística melhoraria a distribuição inicial dos centróides
