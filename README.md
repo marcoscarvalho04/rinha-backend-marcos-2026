@@ -37,7 +37,7 @@ O formato binário gerado é autocontido:
 Recebe `POST /fraud-score`, normaliza os campos da transação em um vetor float32 de 14 dimensões (preenchido até 16 para alinhamento SIMD) e delega ao motor C via pacote `internal/engine`.
 
 ```
-Requisição → decode JSON (sync.Pool) → vetorizar → engine.GetFraudScore → encode JSON
+Requisição → fasthttp → go-json decode (sync.Pool) → vetorizar → engine.GetFraudScore → go-json encode
 ```
 
 ### Motor C — `internal/engine`
@@ -46,8 +46,8 @@ Exposto ao Go por uma fronteira CGO limpa (`fraud.go` → `core.h`). Na iniciali
 
 Por requisição (`search_top_5`):
 
-1. **Varredura de centróides** — produtos internos AVX2 nos 1.024 centróides para encontrar o cluster mais próximo
-2. **Busca no bucket** — varredura linear nos vetores daquele cluster; insertion sort mantém os 5 vizinhos mais próximos
+1. **Varredura de centróides** — produtos internos AVX2 nos 1.024 centróides; insertion sort mantém os 3 mais próximos (`nprobe = 3`)
+2. **Busca nos buckets** — varredura linear nos 3 clusters selecionados; top-5 global mantido via insertion sort
 3. **Pontuação** — `fraud_score = (vizinhos fraudulentos no top-5) / 5,0`
 
 AVX2 processa 16 floats por iteração de loop (dois registradores de 256 bits via `_mm256_loadu_ps`), compilado com `-O3 -mavx2`.
@@ -125,8 +125,9 @@ make run
 
 ---
 
-## Limitações Conhecidas
+## Decisões de Design
 
-- Risco de MCC fixo em `0,5` — carregar de `mcc_risk.json` melhoraria a precisão dos vetores
-- Busca IVF com `nprobe = 1` (apenas o cluster mais próximo) — buscar em 2–4 clusters aumentaria o recall com custo marginal de latência
-- K-Means sem inicialização K-Means++ — uma semente probabilística melhoraria a distribuição inicial dos centróides
+- **nprobe = 3**: a busca varre os 3 clusters mais próximos e mantém um top-5 global, compensando imperfeições do clustering e melhorando o recall em vetores próximos de fronteiras de cluster
+- **GOGC=off + GOMEMLIMIT=210MiB**: GC periódico desativado; coleta só ocorre por pressão de memória, eliminando spikes de latência no p99
+- **Unix socket nginx → API**: elimina o stack TCP interno, reduzindo ~100–200µs por requisição em Linux nativo
+- **K-Means sem K-Means++**: inicialização aleatória com 5 iterações de refinamento completo — suficiente para distribuição uniforme dos clusters sem custo proibitivo no build
