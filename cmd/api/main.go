@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	gojson "github.com/goccy/go-json"
+	"github.com/valyala/fasthttp"
+
 	"github.com/marcos-codes/rinha-2026/internal/engine"
 )
 
@@ -97,7 +98,6 @@ type FraudPayload struct {
 	LastTransaction *LastTransaction `json:"last_transaction"`
 }
 
-// FraudResponse é tipado para evitar alocação de map a cada resposta.
 type FraudResponse struct {
 	Approved   bool    `json:"approved"`
 	FraudScore float32 `json:"fraud_score"`
@@ -107,10 +107,11 @@ var payloadPool = sync.Pool{
 	New: func() any { return new(FraudPayload) },
 }
 
+// content-type pré-alocado para evitar conversão string→[]byte por request
+var contentTypeJSON = []byte("application/json")
+
 // --- Parsing de tempo sem alocação ---
 
-// parseRFC3339Hour extrai a hora de uma string RFC3339 sem alocar time.Time.
-// Formato fixo: "2006-01-02T15:04:05Z" — hora nos índices 11:13.
 func parseRFC3339Hour(s string) float32 {
 	if len(s) < 13 {
 		return 0
@@ -119,7 +120,6 @@ func parseRFC3339Hour(s string) float32 {
 	return float32(h) / 23.0
 }
 
-// parseRFC3339Weekday calcula o dia da semana (0=Dom..6=Sab) via algoritmo de Tomohiko Sakamoto.
 func parseRFC3339Weekday(s string) float32 {
 	if len(s) < 10 {
 		return 0
@@ -135,8 +135,6 @@ func parseRFC3339Weekday(s string) float32 {
 	return float32(w) / 6.0
 }
 
-// diffMinutes calcula a diferença em minutos entre dois timestamps RFC3339.
-// Usa time.Parse apenas quando necessário — ambos os campos têm formato garantido.
 func diffMinutes(from, to string) float32 {
 	t1, err1 := time.Parse(time.RFC3339, from)
 	t2, err2 := time.Parse(time.RFC3339, to)
@@ -158,19 +156,30 @@ func clamp(v float32) float32 {
 	return v
 }
 
-func readyHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
+func router(ctx *fasthttp.RequestCtx) {
+	switch string(ctx.Path()) {
+	case "/ready":
+		if ctx.IsGet() {
+			ctx.SetStatusCode(fasthttp.StatusOK)
+		}
+	case "/fraud-score":
+		if ctx.IsPost() {
+			fraudScoreHandler(ctx)
+		}
+	default:
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+	}
 }
 
-func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
+func fraudScoreHandler(ctx *fasthttp.RequestCtx) {
 	payload := payloadPool.Get().(*FraudPayload)
-	// Reset de campos que não são sobrescritos integralmente pelo decoder
 	payload.Customer.KnownMerchants = payload.Customer.KnownMerchants[:0]
 	payload.LastTransaction = nil
 	defer payloadPool.Put(payload)
 
-	if err := gojson.NewDecoder(r.Body).Decode(payload); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+	// PostBody() é zero-copy — aponta para o buffer interno do fasthttp
+	if err := gojson.Unmarshal(ctx.PostBody(), payload); err != nil {
+		ctx.Error("invalid payload", fasthttp.StatusBadRequest)
 		return
 	}
 
@@ -214,8 +223,8 @@ func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
 
 	result := engine.GetFraudScore(&vec)
 
-	w.Header().Set("Content-Type", "application/json")
-	gojson.NewEncoder(w).Encode(FraudResponse{
+	ctx.SetContentTypeBytes(contentTypeJSON)
+	gojson.NewEncoder(ctx).Encode(FraudResponse{
 		Approved:   result.Approved,
 		FraudScore: result.Score,
 	})
@@ -226,19 +235,13 @@ func main() {
 	engine.Init("./resources/dataset_otimizado.bin")
 	fmt.Println("🚀 Memória mapeada via mmap. Motor C pronto.")
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /ready", readyHandler)
-	mux.HandleFunc("POST /fraud-score", fraudScoreHandler)
-
-	server := &http.Server{
-		Handler:      mux,
+	server := &fasthttp.Server{
+		Handler:      router,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// SOCKET_PATH definido → unix socket (produção via Docker).
-	// Sem variável → TCP na 9999 (desenvolvimento local).
 	if socketPath := os.Getenv("SOCKET_PATH"); socketPath != "" {
 		os.Remove(socketPath)
 		ln, err := net.Listen("unix", socketPath)
@@ -247,11 +250,10 @@ func main() {
 		}
 		os.Chmod(socketPath, 0777)
 		defer os.Remove(socketPath)
-		fmt.Printf("🔥 API rodando via unix socket: %s\n", socketPath)
+		fmt.Printf("🔥 API via unix socket: %s\n", socketPath)
 		log.Fatal(server.Serve(ln))
 	} else {
-		server.Addr = ":9999"
 		fmt.Println("🔥 API de Detecção de Fraude rodando na porta 9999")
-		log.Fatal(server.ListenAndServe())
+		log.Fatal(server.ListenAndServe(":9999"))
 	}
 }

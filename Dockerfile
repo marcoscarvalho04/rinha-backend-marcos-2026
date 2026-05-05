@@ -1,5 +1,5 @@
 # ESTÁGIO 1: Builder 
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.24-bookworm AS builder
 
 # Instala as ferramentas CGO (gcc, libc, etc)
 RUN apt-get update && apt-get install -y gcc make

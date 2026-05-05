@@ -10,7 +10,8 @@
 #include <unistd.h>
 
 #define NUM_CLUSTERS 1024
-#define VECTOR_DIM 16
+#define VECTOR_DIM   16
+#define NPROBE        3
 
 // --- Ponteiros Globais do Banco em Memória (Zero-Copy via mmap) ---
 float* centroids = NULL;
@@ -85,66 +86,70 @@ SearchResult search_top_5(float* target) {
     __m256 t_8_15 = _mm256_loadu_ps(target + 8);
 
     // ==========================================
-    // FASE 1: Encontrar o Centróide mais próximo
+    // FASE 1: Encontrar os NPROBE centróides mais próximos
     // ==========================================
-    int best_cluster = 0;
-    float min_centroid_dist = 1e9f;
+    float probe_dists[NPROBE];
+    int   probe_ids[NPROBE];
+    for (int i = 0; i < NPROBE; i++) {
+        probe_dists[i] = 1e9f;
+        probe_ids[i]   = 0;
+    }
 
     for (int i = 0; i < NUM_CLUSTERS; i++) {
         float* c_ptr = centroids + (i * VECTOR_DIM);
-        __m256 c_0_7 = _mm256_loadu_ps(c_ptr);
+        __m256 c_0_7  = _mm256_loadu_ps(c_ptr);
         __m256 c_8_15 = _mm256_loadu_ps(c_ptr + 8);
 
-        __m256 diff_0_7 = _mm256_sub_ps(t_0_7, c_0_7);
+        __m256 diff_0_7  = _mm256_sub_ps(t_0_7,  c_0_7);
         __m256 diff_8_15 = _mm256_sub_ps(t_8_15, c_8_15);
+        __m256 sq_0_7    = _mm256_mul_ps(diff_0_7,  diff_0_7);
+        __m256 sq_8_15   = _mm256_mul_ps(diff_8_15, diff_8_15);
+        float dist = horizontal_add_m256(_mm256_add_ps(sq_0_7, sq_8_15));
 
-        __m256 sq_0_7 = _mm256_mul_ps(diff_0_7, diff_0_7);
-        __m256 sq_8_15 = _mm256_mul_ps(diff_8_15, diff_8_15);
-
-        __m256 sum = _mm256_add_ps(sq_0_7, sq_8_15);
-        float dist = horizontal_add_m256(sum);
-
-        if (dist < min_centroid_dist) {
-            min_centroid_dist = dist;
-            best_cluster = i;
+        if (dist < probe_dists[NPROBE - 1]) {
+            int pos = NPROBE - 2;
+            while (pos >= 0 && probe_dists[pos] > dist) {
+                probe_dists[pos + 1] = probe_dists[pos];
+                probe_ids[pos + 1]   = probe_ids[pos];
+                pos--;
+            }
+            probe_dists[pos + 1] = dist;
+            probe_ids[pos + 1]   = i;
         }
     }
 
     // ==========================================
-    // FASE 2: Busca Local Apenas no Bucket Certo
+    // FASE 2: Busca nos NPROBE buckets, top-5 global
     // ==========================================
-    uint32_t start_idx = bucket_offsets[best_cluster];
-    uint32_t end_idx = bucket_offsets[best_cluster + 1];
-
     float top5_dists[5] = {1e9f, 1e9f, 1e9f, 1e9f, 1e9f};
     uint8_t top5_fraud[5] = {0, 0, 0, 0, 0};
 
-    for (uint32_t i = start_idx; i < end_idx; i++) {
-        float* v_ptr = all_vectors + (i * VECTOR_DIM);
-        
-        // _loadu_ps é usado para prevenir falhas caso a memória não seja alinhada a 32 bytes
-        __m256 v_0_7 = _mm256_loadu_ps(v_ptr);
-        __m256 v_8_15 = _mm256_loadu_ps(v_ptr + 8);
+    for (int p = 0; p < NPROBE; p++) {
+        uint32_t start_idx = bucket_offsets[probe_ids[p]];
+        uint32_t end_idx   = bucket_offsets[probe_ids[p] + 1];
 
-        __m256 diff_0_7 = _mm256_sub_ps(t_0_7, v_0_7);
-        __m256 diff_8_15 = _mm256_sub_ps(t_8_15, v_8_15);
+        for (uint32_t i = start_idx; i < end_idx; i++) {
+            float* v_ptr = all_vectors + (i * VECTOR_DIM);
 
-        __m256 sq_0_7 = _mm256_mul_ps(diff_0_7, diff_0_7);
-        __m256 sq_8_15 = _mm256_mul_ps(diff_8_15, diff_8_15);
+            __m256 v_0_7  = _mm256_loadu_ps(v_ptr);
+            __m256 v_8_15 = _mm256_loadu_ps(v_ptr + 8);
 
-        __m256 sum = _mm256_add_ps(sq_0_7, sq_8_15);
-        float dist = horizontal_add_m256(sum);
+            __m256 diff_0_7  = _mm256_sub_ps(t_0_7,  v_0_7);
+            __m256 diff_8_15 = _mm256_sub_ps(t_8_15, v_8_15);
+            __m256 sq_0_7    = _mm256_mul_ps(diff_0_7,  diff_0_7);
+            __m256 sq_8_15   = _mm256_mul_ps(diff_8_15, diff_8_15);
+            float dist = horizontal_add_m256(_mm256_add_ps(sq_0_7, sq_8_15));
 
-        // Insertion Sort Min-Heap para o Top 5
-        if (dist < top5_dists[4]) {
-            int pos = 3;
-            while (pos >= 0 && top5_dists[pos] > dist) {
-                top5_dists[pos + 1] = top5_dists[pos];
-                top5_fraud[pos + 1] = top5_fraud[pos];
-                pos--;
+            if (dist < top5_dists[4]) {
+                int pos = 3;
+                while (pos >= 0 && top5_dists[pos] > dist) {
+                    top5_dists[pos + 1] = top5_dists[pos];
+                    top5_fraud[pos + 1] = top5_fraud[pos];
+                    pos--;
+                }
+                top5_dists[pos + 1] = dist;
+                top5_fraud[pos + 1] = all_flags[i];
             }
-            top5_dists[pos + 1] = dist;
-            top5_fraud[pos + 1] = all_flags[i];
         }
     }
 
