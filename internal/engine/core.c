@@ -14,11 +14,11 @@
 #define NPROBE        3
 
 // --- Ponteiros Globais do Banco em Memória (Zero-Copy via mmap) ---
-float* centroids = NULL;
+float*    centroids = NULL;
 uint32_t* bucket_offsets = NULL;
-float* all_vectors = NULL;
-uint8_t* all_flags = NULL;
-size_t db_total_records = 0;
+uint16_t* all_vectors = NULL;  // float16 para economizar memória (~metade do tamanho)
+uint8_t*  all_flags = NULL;
+size_t    db_total_records = 0;
 
 // --- Função Auxiliar SIMD: Soma horizontal de um registrador de 256 bits ---
 static inline float horizontal_add_m256(__m256 v) {
@@ -65,9 +65,9 @@ void init_memory(const char* filepath) {
     // O último offset guarda exatamente o número total de registros armazenados
     db_total_records = bucket_offsets[NUM_CLUSTERS];
 
-    // 3. Matriz de Vetores: N * 16 floats
-    all_vectors = (float*)(base + offset_buckets);
-    size_t offset_vectors = offset_buckets + (db_total_records * VECTOR_DIM * sizeof(float));
+    // 3. Matriz de Vetores: N * 16 float16 (uint16) — metade do tamanho vs float32
+    all_vectors = (uint16_t*)(base + offset_buckets);
+    size_t offset_vectors = offset_buckets + (db_total_records * VECTOR_DIM * sizeof(uint16_t));
 
     // 4. Flags de Fraude: N bytes
     all_flags = (uint8_t*)(base + offset_vectors);
@@ -129,10 +129,11 @@ SearchResult search_top_5(float* target) {
         uint32_t end_idx   = bucket_offsets[probe_ids[p] + 1];
 
         for (uint32_t i = start_idx; i < end_idx; i++) {
-            float* v_ptr = all_vectors + (i * VECTOR_DIM);
+            uint16_t* v_ptr = all_vectors + (i * VECTOR_DIM);
 
-            __m256 v_0_7  = _mm256_loadu_ps(v_ptr);
-            __m256 v_8_15 = _mm256_loadu_ps(v_ptr + 8);
+            // Carrega 8 float16 em 128 bits e converte para 8 float32 em 256 bits (F16C)
+            __m256 v_0_7  = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(v_ptr)));
+            __m256 v_8_15 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(v_ptr + 8)));
 
             __m256 diff_0_7  = _mm256_sub_ps(t_0_7,  v_0_7);
             __m256 diff_8_15 = _mm256_sub_ps(t_8_15, v_8_15);

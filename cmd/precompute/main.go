@@ -148,6 +148,22 @@ func distSq(a, b [16]float32) float32 {
 	return s
 }
 
+// float32ToFloat16 converte um float32 para o formato IEEE 754 float16 (uint16).
+func float32ToFloat16(f float32) uint16 {
+	bits := math.Float32bits(f)
+	sign := uint16((bits >> 31) & 0x1)
+	exp := int32((bits>>23)&0xFF) - 127 + 15
+	mantissa := bits & 0x7FFFFF
+
+	if exp <= 0 {
+		return sign << 15
+	}
+	if exp >= 31 {
+		return (sign << 15) | (0x1F << 10)
+	}
+	return (sign << 15) | (uint16(exp) << 10) | uint16(mantissa>>13)
+}
+
 func saveOptimizedBinary(centroids [][16]float32, buckets [][]int, allVectors [][16]float32, labels []uint8) {
 	f, err := os.Create("./resources/dataset_otimizado.bin")
 	if err != nil {
@@ -157,7 +173,7 @@ func saveOptimizedBinary(centroids [][16]float32, buckets [][]int, allVectors []
 
 	w := bufio.NewWriterSize(f, 8*1024*1024) // buffer de 8MB
 
-	// 1. Centróides: 1024 × 16 float32
+	// 1. Centróides: 1024 × 16 float32 (mantidos em f32 — são pequenos e usados internamente)
 	binary.Write(w, binary.LittleEndian, centroids)
 
 	// 2. Offsets dos buckets: 1025 uint32
@@ -170,10 +186,14 @@ func saveOptimizedBinary(centroids [][16]float32, buckets [][]int, allVectors []
 	offsets[NumClusters] = curr
 	binary.Write(w, binary.LittleEndian, offsets)
 
-	// 3. Vetores reordenados por bucket: N × 16 float32
+	// 3. Vetores reordenados por bucket: N × 16 float16 (uint16) — metade do tamanho vs float32
+	f16buf := make([]uint16, 16)
 	for _, b := range buckets {
 		for _, idx := range b {
-			binary.Write(w, binary.LittleEndian, allVectors[idx])
+			for d := 0; d < 16; d++ {
+				f16buf[d] = float32ToFloat16(allVectors[idx][d])
+			}
+			binary.Write(w, binary.LittleEndian, f16buf)
 		}
 	}
 

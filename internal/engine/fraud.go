@@ -1,7 +1,7 @@
 package engine
 
 /*
-#cgo CFLAGS: -O3 -mavx2
+#cgo CFLAGS: -O3 -march=haswell
 #include <stdlib.h>
 #include "core.h"
 */
