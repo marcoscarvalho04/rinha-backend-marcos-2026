@@ -6,7 +6,7 @@ volumes:
 
 services:
   api01:
-    image: marcoscarvalho04/rinha-backend-marcos-2026:latest
+    image: mpsiqueira/rinha-backend-marcos-2026:latest
     hostname: api01
     volumes:
       - sock01:/run
@@ -21,7 +21,7 @@ services:
           memory: "250MB"
 
   api02:
-    image: marcoscarvalho04/rinha-backend-marcos-2026:latest
+    image: mpsiqueira/rinha-backend-marcos-2026:latest
     hostname: api02
     volumes:
       - sock02:/run
