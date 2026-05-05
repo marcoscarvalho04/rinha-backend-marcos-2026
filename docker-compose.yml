@@ -6,8 +6,7 @@ volumes:
 
 services:
   api01:
-    build: .
-    image: rinha-api:latest
+    image: marcoscarvalho04/rinha-backend-marcos-2026:latest
     hostname: api01
     volumes:
       - sock01:/run
@@ -20,11 +19,9 @@ services:
         limits:
           cpus: "0.6"
           memory: "250MB"
-    tmpfs:
-      - /app/data
 
   api02:
-    image: rinha-api:latest
+    image: marcoscarvalho04/rinha-backend-marcos-2026:latest
     hostname: api02
     volumes:
       - sock02:/run
@@ -37,8 +34,6 @@ services:
         limits:
           cpus: "0.6"
           memory: "250MB"
-    tmpfs:
-      - /app/data
 
   nginx:
     image: nginx:latest
