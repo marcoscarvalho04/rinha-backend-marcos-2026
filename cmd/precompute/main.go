@@ -15,7 +15,7 @@ import (
 const (
 	NumClusters = 1024
 	VectorDim   = 16
-	KMeansIter  = 5
+	KMeansIter  = 15
 )
 
 type ReferenceRecord struct {

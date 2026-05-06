@@ -9,9 +9,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define NUM_CLUSTERS 1024
-#define VECTOR_DIM   16
-#define NPROBE        3
+#define NUM_CLUSTERS  1024
+#define VECTOR_DIM    16
+#define NPROBE         5
+#define PREFETCH_DIST  8  // vetores à frente para pré-carregar (8 × 32 bytes = 256 bytes)
 
 // --- Ponteiros Globais do Banco em Memória (Zero-Copy via mmap) ---
 float*    centroids = NULL;
@@ -129,6 +130,9 @@ SearchResult search_top_5(float* target) {
         uint32_t end_idx   = bucket_offsets[probe_ids[p] + 1];
 
         for (uint32_t i = start_idx; i < end_idx; i++) {
+            // Pré-carrega o vetor PREFETCH_DIST posições à frente para esconder latência de RAM
+            __builtin_prefetch(all_vectors + ((i + PREFETCH_DIST) * VECTOR_DIM), 0, 1);
+
             uint16_t* v_ptr = all_vectors + (i * VECTOR_DIM);
 
             // Carrega 8 float16 em 128 bits e converte para 8 float32 em 256 bits (F16C)

@@ -135,13 +135,32 @@ func parseRFC3339Weekday(s string) float32 {
 	return float32(w) / 6.0
 }
 
-func diffMinutes(from, to string) float32 {
-	t1, err1 := time.Parse(time.RFC3339, from)
-	t2, err2 := time.Parse(time.RFC3339, to)
-	if err1 != nil || err2 != nil {
+// toMinutes converte um timestamp RFC3339 para minutos desde uma época fixa,
+// sem nenhuma alocação de heap.
+func toMinutes(s string) int64 {
+	if len(s) < 16 {
 		return 0
 	}
-	return float32(t2.Sub(t1).Minutes())
+	y  := int64(s[0]-'0')*1000 + int64(s[1]-'0')*100 + int64(s[2]-'0')*10 + int64(s[3]-'0')
+	mo := int64(s[5]-'0')*10 + int64(s[6]-'0')
+	d  := int64(s[8]-'0')*10 + int64(s[9]-'0')
+	h  := int64(s[11]-'0')*10 + int64(s[12]-'0')
+	mi := int64(s[14]-'0')*10 + int64(s[15]-'0')
+
+	var monthDays = [13]int64{0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334}
+	days := y*365 + (y-1)/4 - (y-1)/100 + (y-1)/400 + monthDays[mo] + d
+	if mo > 2 && (y%4 == 0 && (y%100 != 0 || y%400 == 0)) {
+		days++
+	}
+	return days*24*60 + h*60 + mi
+}
+
+func diffMinutes(from, to string) float32 {
+	diff := toMinutes(to) - toMinutes(from)
+	if diff < 0 {
+		return 0
+	}
+	return float32(diff)
 }
 
 // --- Handlers ---
@@ -187,13 +206,17 @@ func fraudScoreHandler(ctx *fasthttp.RequestCtx) {
 
 	vec[0] = clamp(payload.Transaction.Amount / norm.MaxAmount)
 	vec[1] = clamp(float32(payload.Transaction.Installments) / norm.MaxInstallments)
-	vec[2] = clamp((payload.Transaction.Amount / payload.Customer.AvgAmount) / norm.AmountVsAvgRatio)
+	if payload.Customer.AvgAmount > 0 {
+		vec[2] = clamp((payload.Transaction.Amount / payload.Customer.AvgAmount) / norm.AmountVsAvgRatio)
+	} else {
+		vec[2] = 1.0 // sem histórico: ratio máximo (suspeito)
+	}
 	vec[3] = parseRFC3339Hour(payload.Transaction.RequestedAt)
 	vec[4] = parseRFC3339Weekday(payload.Transaction.RequestedAt)
 
 	if payload.LastTransaction == nil {
-		vec[5] = -1.0
-		vec[6] = -1.0
+		vec[5] = 0.0 // sem última transação: sem anomalia de velocidade
+		vec[6] = 0.0 // sem última localização: sem anomalia de distância
 	} else {
 		diff := diffMinutes(payload.LastTransaction.Timestamp, payload.Transaction.RequestedAt)
 		vec[5] = clamp(diff / norm.MaxMinutes)
