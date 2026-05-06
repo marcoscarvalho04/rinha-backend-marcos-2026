@@ -11,7 +11,7 @@
 
 #define NUM_CLUSTERS  1024
 #define VECTOR_DIM    16
-#define NPROBE         5
+#define NPROBE        20
 #define PREFETCH_DIST  8  // vetores à frente para pré-carregar (8 × 32 bytes = 256 bytes)
 
 // --- Ponteiros Globais do Banco em Memória (Zero-Copy via mmap) ---
