@@ -131,7 +131,9 @@ func parseRFC3339Weekday(s string) float32 {
 	if m < 3 {
 		y--
 	}
+	// Sakamoto: dom=0..sáb=6 → converter para seg=0..dom=6 (conforme doc)
 	w := (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7
+	w = (w + 6) % 7
 	return float32(w) / 6.0
 }
 
