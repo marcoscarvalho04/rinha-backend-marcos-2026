@@ -215,8 +215,8 @@ func fraudScoreHandler(ctx *fasthttp.RequestCtx) {
 	vec[4] = parseRFC3339Weekday(payload.Transaction.RequestedAt)
 
 	if payload.LastTransaction == nil {
-		vec[5] = 0.0 // sem última transação: sem anomalia de velocidade
-		vec[6] = 0.0 // sem última localização: sem anomalia de distância
+		vec[5] = -1.0 // sentinel oficial do dataset: agrupa casos sem histórico no espaço vetorial
+		vec[6] = -1.0
 	} else {
 		diff := diffMinutes(payload.LastTransaction.Timestamp, payload.Transaction.RequestedAt)
 		vec[5] = clamp(diff / norm.MaxMinutes)
