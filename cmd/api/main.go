@@ -137,10 +137,10 @@ func parseRFC3339Weekday(s string) float32 {
 	return float32(w) / 6.0
 }
 
-// toMinutes converte um timestamp RFC3339 para minutos desde uma época fixa,
-// sem nenhuma alocação de heap.
-func toMinutes(s string) int64 {
-	if len(s) < 16 {
+// toSeconds converte um timestamp RFC3339 para segundos desde uma época fixa,
+// sem nenhuma alocação de heap. Inclui segundos para evitar truncamento.
+func toSeconds(s string) int64 {
+	if len(s) < 19 {
 		return 0
 	}
 	y  := int64(s[0]-'0')*1000 + int64(s[1]-'0')*100 + int64(s[2]-'0')*10 + int64(s[3]-'0')
@@ -148,21 +148,22 @@ func toMinutes(s string) int64 {
 	d  := int64(s[8]-'0')*10 + int64(s[9]-'0')
 	h  := int64(s[11]-'0')*10 + int64(s[12]-'0')
 	mi := int64(s[14]-'0')*10 + int64(s[15]-'0')
+	se := int64(s[17]-'0')*10 + int64(s[18]-'0')
 
 	var monthDays = [13]int64{0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334}
 	days := y*365 + (y-1)/4 - (y-1)/100 + (y-1)/400 + monthDays[mo] + d
 	if mo > 2 && (y%4 == 0 && (y%100 != 0 || y%400 == 0)) {
 		days++
 	}
-	return days*24*60 + h*60 + mi
+	return days*24*3600 + h*3600 + mi*60 + se
 }
 
 func diffMinutes(from, to string) float32 {
-	diff := toMinutes(to) - toMinutes(from)
+	diff := toSeconds(to) - toSeconds(from)
 	if diff < 0 {
 		return 0
 	}
-	return float32(diff)
+	return float32(diff) / 60.0 // minutos fracionários, igual ao time.Parse original
 }
 
 // --- Handlers ---
