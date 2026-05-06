@@ -71,12 +71,46 @@ func main() {
 	fmt.Println("✅ dataset_otimizado.bin criado com sucesso!")
 }
 
-// initCentroids escolhe NumClusters vetores aleatórios como centróides iniciais.
+// initCentroids usa K-Means++ para escolher centróides iniciais bem distribuídos.
+// Cada centróide é escolhido com probabilidade proporcional a dist² ao centróide mais próximo,
+// maximizando a dispersão inicial e acelerando a convergência.
 func initCentroids(vectors [][16]float32) [][16]float32 {
-	perm := rand.Perm(len(vectors))
-	centroids := make([][16]float32, NumClusters)
-	for i := 0; i < NumClusters; i++ {
-		centroids[i] = vectors[perm[i]]
+	n := len(vectors)
+	centroids := make([][16]float32, 0, NumClusters)
+
+	// Primeiro centróide: aleatório
+	centroids = append(centroids, vectors[rand.Intn(n)])
+
+	dists := make([]float64, n)
+
+	for k := 1; k < NumClusters; k++ {
+		// Calcula distância² de cada vetor ao centróide mais próximo
+		var total float64
+		last := centroids[k-1]
+		for i := 0; i < n; i++ {
+			d := float64(distSq(vectors[i], last))
+			if k == 1 || d < dists[i] {
+				dists[i] = d
+			}
+			total += dists[i]
+		}
+
+		// Amostragem por roleta: escolhe próximo centróide proporcionalmente a dist²
+		target := rand.Float64() * total
+		var acc float64
+		chosen := n - 1
+		for i := 0; i < n; i++ {
+			acc += dists[i]
+			if acc >= target {
+				chosen = i
+				break
+			}
+		}
+		centroids = append(centroids, vectors[chosen])
+
+		if k%100 == 0 {
+			fmt.Printf("   K-Means++ init: %d/%d centróides\n", k, NumClusters)
+		}
 	}
 	return centroids
 }
