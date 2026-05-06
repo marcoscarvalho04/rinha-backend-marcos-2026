@@ -1,6 +1,6 @@
 # Jornada: Rinha de Backend 2026 — Motor de Detecção de Fraudes
 
-Este documento narra as decisões técnicas, experimentos e aprendizados que levaram ao resultado final de **5319 pontos** e **99,98% de precisão** na detecção de fraudes.
+Este documento narra as decisões técnicas, experimentos e aprendizados que levaram ao resultado final de **5319 pontos** e **99,98% de precisão** na detecção de fraudes, pelo menos nos **teste iniciais** .
 
 ---
 
@@ -8,7 +8,7 @@ Este documento narra as decisões técnicas, experimentos e aprendizados que lev
 
 Construir uma API de detecção de fraude que, para cada transação recebida, transforma o payload em um vetor de 14 dimensões e busca os 5 vizinhos mais próximos num dataset de 3 milhões de referências. A decisão é simples: `fraud_score = fraudes_entre_os_5 / 5`, e `approved = score < 0.6`.
 
-O twist: a stack inteira — dois servidores de API + nginx — não pode usar mais de **1 CPU e 350 MB de RAM**. Latência, precisão e eficiência de memória competem diretamente. A solução, para adição de dificuldade, não poderia usar quaisquer tipo de banco vetorial e deveria combinar elegância e performance.
+O twist: a stack inteira — dois servidores de API + nginx — não pode usar mais de **1 CPU e 350 MB de RAM**. Latência, precisão e eficiência de memória competem diretamente. A solução, para adição de dificuldade **pessoal**, não poderia usar quaisquer tipo de banco vetorial e deveria combinar elegância e performance.
 
 ---
 
@@ -153,4 +153,11 @@ Mesma quantidade de vetores escaneados, mesma latência — mas sobre fronteiras
 
 **Mais clusters nem sempre significa melhor detecção.** O underfitting de buckets pequenos é real — abaixo de ~1.500 vetores por bucket, a razão fraude/legítimo fica instável. A granularidade de clusters deve ser balanceada contra o tamanho do dataset.
 
-**O verdadeiro gargalo era estrutural.** Os 13 erros que restaram são provavelmente irredutíveis com essa vetorização: transações onde as 14 dimensões não criam separação suficiente no espaço euclidiano entre fraude e legítimo. Não é um bug — é o limite do modelo de features.
+**O verdadeiro gargalo era estrutural.** Os 13 erros que restaram são provavelmente irredutíveis com essa vetorização: transações onde as 14 dimensões não criam separação suficiente no espaço euclidiano entre fraude e legítimo. Não é um bug — é o limite do modelo de features. No final poderia explorar mais soluções - mas por hora vou deixar em aberto, afinal são apenas 13 erros e o score foi bem acima do esperado para o meu desafio inicial. 
+
+**Possibilidade de juntar dois mundos** Pude trazer a elegância do go para tratar toda a parte de requisição, enquanto o C fazia para mim o pior do processamento. E tudo isso rodando em um único CPU, com uma integração que deixa a interface com o GO  - C praticamente intuitiva. 
+
+**Ainda mais liberdade de exploração** Com o motor C rodando em um único CPU, ficaria ainda mais simples fazer experimentos com técnicas de ANN mais robustas como HNSW ou ScaNN, já que a penalidade de latência seria apenas um ajuste do parâmetro max_connection, e não uma reescrita total do motor. 
+
+
+
