@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	NumClusters = 1024
+	NumClusters = 2048
 	VectorDim   = 16
 	KMeansIter  = 15
 )

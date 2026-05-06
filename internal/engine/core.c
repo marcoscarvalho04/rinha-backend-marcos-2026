@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define NUM_CLUSTERS  1024
+#define NUM_CLUSTERS  2048
 #define VECTOR_DIM    16
 #define NPROBE         5
 #define PREFETCH_DIST  8  // vetores à frente para pré-carregar (8 × 32 bytes = 256 bytes)
